@@ -456,19 +456,21 @@ class EthosuDelegate : public SimpleDelegateInterface {
 
   TfLiteStatus Initialize(TfLiteContext* context) override {
     try {
-        ethosu_context.device =
+        TfLiteEthosuContext *ethosu_context = new TfLiteEthosuContext;
+        ethosu_context->device =
 		EthosU::Device::GetSingleton(options_.device_name.c_str());
 
         if (options_.enable_profiling && options_.profiling_buffer_size != 0){
             size_t size = sizeof(EthosuQreadEvent) * options_.profiling_buffer_size;
-            ethosu_context.qread_buffer =
-		    make_shared<EthosU::Buffer>(*ethosu_context.device, size);
-            ethosu_context.qread_buffer->resize(0);
+            ethosu_context->qread_buffer =
+		    make_shared<EthosU::Buffer>(*ethosu_context->device, size);
+            ethosu_context->qread_buffer->resize(0);
         } else {
-            ethosu_context.qread_buffer = nullptr;
+            ethosu_context->qread_buffer = nullptr;
         }
-	ethosu_context.arena_buffer = nullptr;
-	ethosu_context.flash_buffer = nullptr;
+	ethosu_context->arena_buffer = nullptr;
+	ethosu_context->flash_buffer = nullptr;
+	context_map_[context] = ethosu_context;
     } catch (exception &e) {
         TF_LITE_KERNEL_LOG(context, "Failed to create ethos_u driver.\n");
         return kTfLiteDelegateError;
@@ -477,8 +479,8 @@ class EthosuDelegate : public SimpleDelegateInterface {
     return kTfLiteOk;
   }
 
-  void *GetDelegateContext() const{
-      return (void*) &ethosu_context;
+  void *GetDelegateContext(TfLiteContext* context) const{
+      return context_map_.at(context);
   }
 
   const char* Name() const override {
@@ -496,9 +498,17 @@ class EthosuDelegate : public SimpleDelegateInterface {
     return SimpleDelegateInterface::Options();
   }
 
+  ~EthosuDelegate() {
+    std::map<TfLiteContext*, void*>::iterator itr;
+    for (itr = context_map_.begin(); itr != context_map_.end(); ++itr) {
+       delete (TfLiteEthosuContext*)itr->second;
+    }
+  }
+
+
  private:
   const EthosuDelegateOptions options_;
-  TfLiteEthosuContext ethosu_context;
+  std::map<TfLiteContext*, void*> context_map_;
 };
 
 }  // namespace ethosu

@@ -48,7 +48,7 @@ TfLiteRegistration GetDelegateKernelRegistration(
     }
     auto* delegate =
         reinterpret_cast<SimpleDelegateInterface*>(params->delegate->data_);
-    void* delegate_context = delegate->GetDelegateContext();
+    void* delegate_context = delegate->GetDelegateContext(context);
     std::unique_ptr<SimpleDelegateKernelInterface> delegate_kernel(
         delegate->CreateDelegateKernelInterface());
     if (delegate_kernel->Init(context, params, delegate_context) != kTfLiteOk) {
