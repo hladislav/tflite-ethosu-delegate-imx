@@ -115,7 +115,7 @@ class SimpleDelegateInterface {
   virtual SimpleDelegateInterface::Options DelegateOptions() const = 0;
 
   // Get the SimpleDelegate global context data
-  virtual void *GetDelegateContext() const = 0;
+  virtual void *GetDelegateContext(TfLiteContext* context) const = 0;
 };
 
 // Factory class that provides static methods to deal with SimpleDelegate
