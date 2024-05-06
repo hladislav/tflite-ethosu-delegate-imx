@@ -86,13 +86,13 @@ extern const std::map<int, OperatorFeature> OPERATOR_MAP;
 
 typedef std::set<int32_t> BuiltinOperatorList;
 const BuiltinOperatorList shapeless_output_ops{kTfLiteBuiltinQuantize};
-const BuiltinOperatorList no_quant_ops{kTfLiteBuiltinShape, kTfLiteBuiltinArgMax, kTfLiteBuiltinTranspose};
+const BuiltinOperatorList no_quant_ops{kTfLiteBuiltinShape, kTfLiteBuiltinArgMax, kTfLiteBuiltinTranspose, kTfLiteBuiltinMirrorPad};
 const BuiltinOperatorList shapeless_input_ops{kTfLiteBuiltinQuantize, kTfLiteBuiltinSplit, kTfLiteBuiltinSplitV, kTfLiteBuiltinMean,
                                               kTfLiteBuiltinExpandDims, kTfLiteBuiltinMaximum, kTfLiteBuiltinMinimum, kTfLiteBuiltinAdd,
                                               kTfLiteBuiltinMul, kTfLiteBuiltinSub, kTfLiteBuiltinArgMax};
 const BuiltinOperatorList convolution_like_ops{kTfLiteBuiltinConv2d, kTfLiteBuiltinDepthwiseConv2d, kTfLiteBuiltinTransposeConv};
 const BuiltinOperatorList supported_int32_tensor_ops{kTfLiteBuiltinAdd, kTfLiteBuiltinMul, kTfLiteBuiltinSub, kTfLiteBuiltinShape,
-                                                     kTfLiteBuiltinArgMax, kTfLiteBuiltinTranspose};
+                                                     kTfLiteBuiltinArgMax, kTfLiteBuiltinTranspose, kTfLiteBuiltinMirrorPad};
 const BuiltinOperatorList multiple_batch_ops{kTfLiteBuiltinSplitV, kTfLiteBuiltinShape, kTfLiteBuiltinSqueeze, kTfLiteBuiltinSlice,
                                              kTfLiteBuiltinSoftmax, kTfLiteBuiltinUnpack, kTfLiteBuiltinSplit, kTfLiteBuiltinReshape,
                                              kTfLiteBuiltinStridedSlice, kTfLiteBuiltinFullyConnected};
@@ -862,6 +862,26 @@ bool ConstraintPad(TfLiteContext* context,
   return true;
 }
 
+bool ConstraintMirrorPad(TfLiteContext* context,
+                         const TfLiteNode* node,
+                         int32_t builtin_code) {
+  auto& pad = context->tensors[node->inputs->data[1]];
+  auto& input = context->tensors[node->inputs->data[0]];
+  auto& output = context->tensors[node->outputs->data[0]];
+
+  //The number of pad values for each direction must not be
+  //larger than the ifm size in that dimension
+  const int32_t* paddings_data = GetTensorData<int32_t>(&pad);
+  for (int i = 0; i < pad.dims->data[0]; i ++){
+    int32_t before = *paddings_data++;
+    int32_t after = *paddings_data++;
+    if (before > input.dims->data[i] || after > input.dims->data[i])
+      return false;
+  }
+
+  return true;
+}
+
 bool
 ConstraintMeanAxisValue(TfLiteContext* context,
                         const TfLiteNode* node,
@@ -1488,6 +1508,11 @@ const std::map<int, OperatorFeature> OPERATOR_MAP{
   { kTfLiteBuiltinPad,
      { IFM_INDICES,
        {ConstraintPad}
+     }
+  },
+  { kTfLiteBuiltinMirrorPad,
+     { IFM_INDICES,
+       {ConstraintPad, ConstraintMirrorPad}
      }
   },
   { kTfLiteBuiltinSquaredDifference,
