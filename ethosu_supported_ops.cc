@@ -818,11 +818,13 @@ bool ConstraintStridedSliceValues(TfLiteContext* context,
       return false;
   }
 
-  //All Strides values must be 1
-  for (int i = 0; i < NumElements(&strides); i ++){
-    if (strides_data[i] != 1)
-      return false;
-  }
+  //Batch and channel stride values must be 1
+  int num_strides = NumElements(&strides);
+  int32_t s_c = strides_data[num_strides - 1];
+  int32_t s_n = num_strides > 3 ? strides_data[0] : 1;
+  if (s_c != 1 || s_n != 1)
+    return false;
+
   return true;
 }
 

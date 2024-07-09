@@ -8,7 +8,7 @@ include(FetchContent)
 FetchContent_Declare(
   tensorflow
   GIT_REPOSITORY https://github.com/tensorflow/tensorflow.git
-  GIT_TAG v2.14.0
+  GIT_TAG v2.16.2
 )
 
 FetchContent_GetProperties(tensorflow)
