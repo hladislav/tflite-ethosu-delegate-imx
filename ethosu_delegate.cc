@@ -142,16 +142,7 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
         size_t arena_data_size = 0;
 
         for (auto& op : operations) {
-            size_t tensor_count = op.inputs.size() + op.outputs.size() - 1; //cms tensor not included
-            size_t layout_buffer_size = 2 * sizeof(uint32_t) + //Space for in/out tensor count
-                             tensor_count * sizeof(uint32_t) + //Space for base_addr_size
-                             tensor_count * sizeof(uint64_t);  //Space for the base_addr
 
-            op.ethosu_layout_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device, layout_buffer_size);
-            uint32_t *layout_data =reinterpret_cast<uint32_t*>(op.ethosu_layout_buffer->data());
-            uint32_t *base_addr_size = layout_data + 2;
-            layout_data[0] = op.inputs.size() - 4;
-            layout_data[1] = op.outputs.size();
             // Get command stream data size and create buffer
             auto cms_idx = op.inputs[CMS_TENSOR_INDEX];
             auto cms_tensor = &context->tensors[cms_idx];
@@ -166,7 +157,6 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
             auto flash_idx = op.inputs[FLASH_TENSOR_INDEX];
             auto flash_tensor = &context->tensors[flash_idx];
             size_t flash_data_size = flash_tensor->bytes;
-            base_addr_size[0] = static_cast<uint32_t>(flash_data_size);//flash size at first
             if (flash_data_size != 0 && ethosu_context->flash_buffer == nullptr) {
                 ethosu_context->flash_buffer =
 			make_shared<EthosU::Buffer>(*ethosu_context->device, flash_data_size);
@@ -180,22 +170,19 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
             for (int i = 0; i < op.outputs.size(); ++i) {
                 auto tensor = &context->tensors[op.outputs[i]];
                 tmp_arena_size += ALIGN_SIZE(tensor->bytes);
-                base_addr_size[i + op.outputs.size() - 1] = tensor->bytes;//output size at last
                 tensor_address_map[op.outputs[i]] = address_offsets[op.outputs[i]];
             }
             // Get addresses to inputs data
             for (int i = INPUT_TENSOR_INDEX; i < op.inputs.size(); ++i) {
                 auto tensor = &context->tensors[op.inputs[i]];
                 tmp_arena_size += ALIGN_SIZE(tensor->bytes);
-                base_addr_size[i - 1] = tensor->bytes; //inputs tensor
                 tensor_address_map[op.inputs[i]] = address_offsets[op.inputs[i]];
             }
             // Get addresses to scratch data
             for (int i = SCRATCH_TENSOR_INDEX; i < INPUT_TENSOR_INDEX; ++i) {
                 auto tensor = &context->tensors[op.inputs[i]];
                 tmp_arena_size += ALIGN_SIZE(tensor->bytes);
-                base_addr_size[i - 1] = tensor->bytes; //scratch tensor
-                tensor->data.raw = (char*)layout_data; //Avoid no data ptr error in tflite
+                tensor->data.raw = (char*)1; //Avoid no data ptr error in tflite
             }
 
             if (arena_data_size < tmp_arena_size)
@@ -282,18 +269,6 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
         auto &scratch_fast_tensor = ethosu_tensors[scratch_fast_idx];
 	size_t scratch_fast_size = scratch_fast_tensor->shape[0];
 
-        //cms tensor not included
-        size_t tensor_count = ethosu_op->inputs.size() + ethosu_op->outputs.size() - 1;
-        size_t layout_buffer_size = 2 * sizeof(uint32_t) + //Space for in/out tensor count
-                             tensor_count * sizeof(uint32_t) + //Space for base_addr_size
-                             tensor_count * sizeof(uint64_t);  //Space for the base_addr
-
-        op.ethosu_layout_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device, layout_buffer_size);
-        uint32_t *layout_data =reinterpret_cast<uint32_t*>(op.ethosu_layout_buffer->data());
-        uint32_t *base_addr_size = layout_data + 2;
-        layout_data[0] = ethosu_op->inputs.size() - 4;
-        layout_data[1] = ethosu_op->outputs.size();
-
         // Get command stream data size and create buffer
         size_t cms_data_size = cms_buffer->data.size();
         op.ethosu_net_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device, cms_data_size);
@@ -302,7 +277,6 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
 
         // Get flash tensor data size
         auto flash_data_size = flash_buffer->data.size();
-        base_addr_size[0] = static_cast<uint32_t>(flash_data_size);//flash size at first
         if (flash_data_size != 0) {
           op.ethosu_flash_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device, flash_data_size);
           memcpy(op.ethosu_flash_buffer->data(), flash_buffer->data.data(), flash_data_size);
@@ -314,13 +288,11 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
         for (int i = 0; i < ethosu_op->outputs.size(); ++i) {
           auto size = GetTensorDataSize(ethosu_tensors[ethosu_op->outputs[i]]);
           tmp_arena_size += ALIGN_SIZE(size);
-          base_addr_size[i + ethosu_op->inputs.size() - 1] = size;//output size at last
         }
         // Get addresses to inputs data
         for (int i = SCRATCH_TENSOR_INDEX; i < ethosu_op->inputs.size(); ++i) {
           auto size = GetTensorDataSize(ethosu_tensors[ethosu_op->inputs[i]]);
           tmp_arena_size += ALIGN_SIZE(size);
-          base_addr_size[i - 1] = size; //inputs tensor
         }
 
         if (arena_data_size < tmp_arena_size)
@@ -358,7 +330,7 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
       }
 
       for (auto& op : operations) {
-        vector<shared_ptr<EthosU::Buffer>> ifm {ethosu_context->arena_buffer, op.ethosu_layout_buffer};
+        vector<shared_ptr<EthosU::Buffer>> ifm {ethosu_context->arena_buffer};
         vector<shared_ptr<EthosU::Buffer>> ofm {};
         if (options.enable_profiling) {
           ofm.push_back(ethosu_context->qread_buffer);
@@ -422,7 +394,6 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
   TfLiteEthosuContext* ethosu_context;
   struct OperationDataType {
     shared_ptr<EthosU::Buffer> ethosu_net_buffer;  //Buffer for cms tensor
-    shared_ptr<EthosU::Buffer> ethosu_layout_buffer;   //Buffer for layout of in/out/scratch
     shared_ptr<EthosU::Buffer> ethosu_flash_buffer;  //Input buffer for weight tensor
     shared_ptr<EthosU::Network> ethosu_network;
     //for vela model
