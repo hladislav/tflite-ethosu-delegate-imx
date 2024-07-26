@@ -280,7 +280,7 @@ Inference::~Inference() {
     eclose(fd);
 }
 
-void Inference::create(std::vector<uint32_t> &counterConfigs, bool cycleCounterEnable = false) {
+void Inference::create(std::vector<uint32_t> &counterConfigs, bool cycleCounterEnable, EthosU::MemoryLayout layout) {
     ethosu_uapi_inference_create uapi;
 
     if (ifmBuffers.size() > ETHOSU_FD_MAX) {
@@ -310,6 +310,7 @@ void Inference::create(std::vector<uint32_t> &counterConfigs, bool cycleCounterE
     }
 
     uapi.pmu_config.cycle_count = cycleCounterEnable;
+    uapi.memory_layout = layout;
     uapi.inference_type = ETHOSU_UAPI_INFERENCE_OP;
 
     fd = network->ioctl(ETHOSU_IOCTL_INFERENCE_CREATE, static_cast<void *>(&uapi));
@@ -321,6 +322,14 @@ std::vector<uint32_t> Inference::initializeCounterConfig() {
 
 uint32_t Inference::getMaxPmuEventCounters() {
     return ETHOSU_PMU_EVENT_MAX;
+}
+
+int Inference::invoke(int64_t timeoutNanos) const {
+    ethosu_uapi_result_status uapi;
+    eioctl(fd, ETHOSU_IOCTL_INFERENCE_INVOKE, static_cast<void *>(&uapi));
+
+    int ret = this->wait(timeoutNanos);
+    return ret;
 }
 
 int Inference::wait(int64_t timeoutNanos) const {

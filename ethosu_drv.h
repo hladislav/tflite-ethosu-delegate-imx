@@ -31,6 +31,8 @@
 
 namespace EthosU {
 
+typedef ethosu_uapi_memory_layout MemoryLayout;
+
 class Exception : public std::exception {
 public:
     Exception(const char *msg);
@@ -171,13 +173,14 @@ public:
               const T &ifmBegin,
               const T &ifmEnd,
               const T &ofmBegin,
-              const T &ofmEnd) :
+              const T &ofmEnd,
+              MemoryLayout layout) :
         network(network) {
         std::copy(ifmBegin, ifmEnd, std::back_inserter(ifmBuffers));
         std::copy(ofmBegin, ofmEnd, std::back_inserter(ofmBuffers));
         std::vector<uint32_t> counterConfigs = initializeCounterConfig();
 
-        create(counterConfigs, false);
+        create(counterConfigs, false, layout);
     }
     template <typename T, typename U>
     Inference(const std::shared_ptr<Network> &network,
@@ -186,7 +189,8 @@ public:
               const T &ofmBegin,
               const T &ofmEnd,
               const U &counters,
-              bool enableCycleCounter) :
+              bool enableCycleCounter,
+              MemoryLayout layout) :
         network(network) {
         std::copy(ifmBegin, ifmEnd, std::back_inserter(ifmBuffers));
         std::copy(ofmBegin, ofmEnd, std::back_inserter(ofmBuffers));
@@ -196,12 +200,13 @@ public:
             throw EthosU::Exception("PMU Counters argument to large.");
 
         std::copy(counters.begin(), counters.end(), counterConfigs.begin());
-        create(counterConfigs, enableCycleCounter);
+        create(counterConfigs, enableCycleCounter, layout);
     }
 
     virtual ~Inference();
 
     int wait(int64_t timeoutNanos = -1) const;
+    int invoke(int64_t timeoutNanos = -1) const;
     const std::vector<uint32_t> getPmuCounters() const;
     uint64_t getCycleCounter() const;
     bool failed() const;
@@ -213,7 +218,7 @@ public:
     static uint32_t getMaxPmuEventCounters();
 
 private:
-    void create(std::vector<uint32_t> &counterConfigs, bool enableCycleCounter);
+    void create(std::vector<uint32_t> &counterConfigs, bool enableCycleCounter, MemoryLayout layout);
     std::vector<uint32_t> initializeCounterConfig();
 
     int fd;

@@ -30,6 +30,7 @@ limitations under the License.
 #include "tensorflow/lite/builtin_ops.h"
 #include "tensorflow/lite/minimal_logging.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/core/subgraph.h"
 
 using namespace std;
 
@@ -41,6 +42,8 @@ struct TfLiteEthosuContext{
   shared_ptr<EthosU::Buffer> arena_buffer;  //Input buffer for input/ouput/scratch tensor
   shared_ptr<EthosU::Buffer> flash_buffer;  //Input buffer for weight tensor
   shared_ptr<EthosU::Buffer> qread_buffer;  //Ouput buffer for profiling qread data
+  size_t arena_size;
+  size_t flash_size;
 };
 
 // Ethosu delegate kernel.
@@ -52,6 +55,7 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
   TfLiteStatus Init(TfLiteContext* context,
                     const TfLiteDelegateParams* params,
                     void* data) override {
+    const char* meta_ptr = nullptr;
     ethosu_context = reinterpret_cast<TfLiteEthosuContext*>(data);
 
     //Check if vela compiled model
@@ -77,7 +81,7 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
                                    options.cache_file_path.c_str());
                 model = readTFLiteModel(cache_file);
             } else {
-                model_converter = ModelConverter::GetSingleton();
+                auto model_converter = ModelConverter::GetSingleton();
                 model = model_converter->convert(context, params);
                 if (options.cache_file_path != "") {
                     // Write to cache file
@@ -91,6 +95,34 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
             return kTfLiteDelegateError;
         }
         TF_LITE_ENSURE_EQ(context, model->subgraphs.size(), 1);
+        TF_LITE_ENSURE_EQ(context, model->subgraphs[0]->operators.size(), 1);
+        operations.resize(model->subgraphs[0]->operators.size());
+
+        // Get the address offsets for each tensor from metadata
+        for (auto &metadata : model->metadata) {
+            if (metadata->name == OFFLINE_MEM_ALLOC_METADATA) {
+                auto &metadata_buffer = model->buffers[metadata->buffer];
+                meta_ptr = (const char*)metadata_buffer->data.data();
+                break;
+            }
+        }
+        TF_LITE_ENSURE(context, meta_ptr != nullptr);
+        address_offsets = METADATA_TO_OFFSET(meta_ptr);
+
+        size_t arena_size = 0, flash_size = 0;
+        for (int i = 0; i < METADATA_SIZE(meta_ptr); i ++){
+            auto tensor_size = GetTensorDataSize(model->subgraphs[0]->tensors[i]);
+            if (address_offsets[i] >= 0 && address_offsets[i] + tensor_size > arena_size)
+                arena_size = address_offsets[i] + tensor_size;
+        }
+        arena_offset = ethosu_context->arena_size;
+        ethosu_context->arena_size = arena_offset + ALIGN_SIZE(arena_size);
+
+        auto flash_idx = model->subgraphs[0]->operators[0]->inputs[FLASH_TENSOR_INDEX];
+        auto &flash_tensor = model->subgraphs[0]->tensors[flash_idx];
+        flash_size = model->buffers[flash_tensor->buffer]->data.size();
+        flash_offset = ethosu_context->flash_size;
+        ethosu_context->flash_size = flash_offset + ALIGN_SIZE(flash_size);
     } else if (vela_node == params->nodes_to_replace->size) {
         //Offline model compile
         operations.resize(params->nodes_to_replace->size);
@@ -106,6 +138,22 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
             copy(inputs.begin(), inputs.end(), back_inserter(op.inputs));
             copy(outputs.begin(), outputs.end(), back_inserter(op.outputs));
         }
+
+        //Get arena offset for each tensor from meta data
+        size_t bytes;
+        TF_LITE_ENSURE_OK(context, context->GetModelMetadata(context,
+                          OFFLINE_MEM_ALLOC_METADATA, &meta_ptr, &bytes));
+        address_offsets = METADATA_TO_OFFSET(meta_ptr);
+
+        size_t arena_size = 0;
+        for (int i = 0; i < METADATA_SIZE(meta_ptr); i ++){
+            auto tensor = &context->tensors[i];
+            if (address_offsets[i] >= 0 && address_offsets[i] + tensor->bytes > arena_size)
+                arena_size = address_offsets[i] + tensor->bytes;
+        }
+        ethosu_context->arena_size = ALIGN_SIZE(arena_size);
+        flash_offset = 0;
+        arena_offset = 0;
     } else {
         TF_LITE_KERNEL_LOG(context, "Unsupported vela compiled model.\n");
         return kTfLiteDelegateError;
@@ -127,21 +175,36 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
         //Online model compile
         TF_LITE_ENSURE_OK(context, PrepareOnlineCompiledModel(context, node));
     }
+
+    for (auto& op : operations) {
+        vector<shared_ptr<EthosU::Buffer>> ifm {ethosu_context->arena_buffer};
+        vector<shared_ptr<EthosU::Buffer>> ofm {};
+        if (options.enable_profiling) {
+            ofm.push_back(ethosu_context->qread_buffer);
+            ethosu_context->qread_buffer->resize(0);
+        }
+        if (op.need_flash)
+            ifm.push_back(ethosu_context->flash_buffer);
+
+        op.memory_layout.flash_offset = flash_offset;
+        op.memory_layout.arena_offset = arena_offset;
+        op.inference = make_shared<EthosU::Inference>(op.ethosu_network, ifm.begin(), ifm.end(),
+		ofm.begin(), ofm.end(), pmu_counter_config, options.enable_cycle_counter, op.memory_layout);
+    }
+
     return kTfLiteOk;
   }
 
   TfLiteStatus PrepareOfflineCompiledModel(TfLiteContext* context, TfLiteNode* node) {
     try {
-        //Get arena offset for each tensor from meta data
-        const char* buffer = nullptr;
-        size_t bytes;
-        TF_LITE_ENSURE_OK(context, context->GetModelMetadata(context,
-                          OFFLINE_MEM_ALLOC_METADATA, &buffer, &bytes));
-        auto address_offsets = METADATA_TO_OFFSET(buffer);
-
-        size_t arena_data_size = 0;
-
+        if (ethosu_context->arena_buffer == nullptr) {
+            ethosu_context->arena_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device,
+			    ethosu_context->arena_size);
+        }
+        Subgraph* this_subgraph = reinterpret_cast<Subgraph*>(context->impl_);
         for (auto& op : operations) {
+            op.memory_layout.input_count = op.inputs.size() - 4;
+            op.memory_layout.output_count = op.outputs.size();
 
             // Get command stream data size and create buffer
             auto cms_idx = op.inputs[CMS_TENSOR_INDEX];
@@ -157,44 +220,40 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
             auto flash_idx = op.inputs[FLASH_TENSOR_INDEX];
             auto flash_tensor = &context->tensors[flash_idx];
             size_t flash_data_size = flash_tensor->bytes;
+            op.need_flash = (flash_data_size != 0);
             if (flash_data_size != 0 && ethosu_context->flash_buffer == nullptr) {
                 ethosu_context->flash_buffer =
 			make_shared<EthosU::Buffer>(*ethosu_context->device, flash_data_size);
                 memcpy(ethosu_context->flash_buffer->data(), flash_tensor->data.raw, flash_data_size);
             }
-	    op.ethosu_flash_buffer = ethosu_context->flash_buffer;
 
-            // Get the arena data size
-            size_t tmp_arena_size = 0;
             // Get addresses of outputs data
             for (int i = 0; i < op.outputs.size(); ++i) {
-                auto tensor = &context->tensors[op.outputs[i]];
-                tmp_arena_size += ALIGN_SIZE(tensor->bytes);
-                tensor_address_map[op.outputs[i]] = address_offsets[op.outputs[i]];
+                auto idx = op.outputs[i];
+                auto tensor = &context->tensors[idx];
+                op.memory_layout.output_offset[i] = address_offsets[idx];
+                op.memory_layout.output_size[i] = tensor->bytes;
+
+                TfLiteCustomAllocation allocation({ethosu_context->arena_buffer->data() + address_offsets[idx],
+                                tensor->bytes});
+                this_subgraph->SetCustomAllocationForTensor(idx, allocation,
+                                kTfLiteCustomAllocationFlagsSkipAlignCheck);
             }
             // Get addresses to inputs data
-            for (int i = INPUT_TENSOR_INDEX; i < op.inputs.size(); ++i) {
-                auto tensor = &context->tensors[op.inputs[i]];
-                tmp_arena_size += ALIGN_SIZE(tensor->bytes);
-                tensor_address_map[op.inputs[i]] = address_offsets[op.inputs[i]];
-            }
-            // Get addresses to scratch data
-            for (int i = SCRATCH_TENSOR_INDEX; i < INPUT_TENSOR_INDEX; ++i) {
-                auto tensor = &context->tensors[op.inputs[i]];
-                tmp_arena_size += ALIGN_SIZE(tensor->bytes);
-                tensor->data.raw = (char*)1; //Avoid no data ptr error in tflite
-            }
+            for (int i = SCRATCH_TENSOR_INDEX; i < op.inputs.size(); ++i) {
+                auto idx = op.inputs[i];
+                auto tensor = &context->tensors[idx];
+                if (i >= INPUT_TENSOR_INDEX) {
+                    op.memory_layout.input_offset[i - INPUT_TENSOR_INDEX] = address_offsets[idx];
+                    op.memory_layout.input_size[i - INPUT_TENSOR_INDEX] = tensor->bytes;
+                }
 
-            if (arena_data_size < tmp_arena_size)
-                arena_data_size = tmp_arena_size;
+                TfLiteCustomAllocation allocation({ethosu_context->arena_buffer->data() + address_offsets[idx],
+                                tensor->bytes});
+                this_subgraph->SetCustomAllocationForTensor(idx, allocation,
+                                kTfLiteCustomAllocationFlagsSkipAlignCheck);
+            }
         }
-
-	if (ethosu_context->arena_buffer == nullptr) {
-            ethosu_context->arena_buffer =
-		  make_shared<EthosU::Buffer>(*ethosu_context->device, arena_data_size);
-	} else if (ethosu_context->arena_buffer->size() < arena_data_size) {
-	    ethosu_context->arena_buffer->extend(*ethosu_context->device, arena_data_size);
-	}
     } catch (exception &e) {
         TF_LITE_KERNEL_LOG(context, "Failed to alloc ethos_u buffer.\n");
         return kTfLiteDelegateError;
@@ -204,18 +263,6 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
   }
 
   TfLiteStatus PrepareOnlineCompiledModel(TfLiteContext* context, TfLiteNode* node){
-    // Get the address offsets for each tensor from metadata
-    const uint8_t* metadata_ptr = nullptr;
-    for (auto &metadata : model->metadata) {
-       if (metadata->name == OFFLINE_MEM_ALLOC_METADATA) {
-           auto &metadata_buffer = model->buffers[metadata->buffer];
-           metadata_ptr = metadata_buffer->data.data();
-           break;
-       }
-    }
-    TF_LITE_ENSURE(context, metadata_ptr != nullptr);
-    auto address_offsets = METADATA_TO_OFFSET(metadata_ptr);
-
     // Map the ethosu tensor index to tflite tensor index.
     auto FindTfliteTensorIndex = [&](std::string name) -> int32_t {
       for (int i = 0; i < context->tensors_size; i ++){
@@ -224,85 +271,73 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
       }
       return -1;
     };
-    // Map the inputs
-    for (int i = 0; i < model->subgraphs[0]->inputs.size(); i++){
-      auto ethosu_idx = model->subgraphs[0]->inputs[i];
-      auto &ethosu_tensor = model->subgraphs[0]->tensors[ethosu_idx];
-      auto tflite_idx = FindTfliteTensorIndex(ethosu_tensor->name);
-      if (tflite_idx == -1)
-          return kTfLiteError;
-      tensor_address_map[tflite_idx] = address_offsets[ethosu_idx];
-    }
-    // Map the outputs
-    for (int i = 0; i < model->subgraphs[0]->outputs.size(); i++){
-      auto ethosu_idx = model->subgraphs[0]->outputs[i];
-      auto &ethosu_tensor = model->subgraphs[0]->tensors[ethosu_idx];
-      auto tflite_idx = FindTfliteTensorIndex(ethosu_tensor->name);
-      if (tflite_idx == -1)
-          return kTfLiteError;
-      tensor_address_map[tflite_idx] = address_offsets[ethosu_idx];
-    }
 
     // Preare the buffers for ethosu device
     try {
-      size_t arena_data_size = 0;
-      operations.resize(model->subgraphs[0]->operators.size());
-      auto &ethosu_tensors = model->subgraphs[0]->tensors;
+      Subgraph* this_subgraph = reinterpret_cast<Subgraph*>(context->impl_);
+      if (ethosu_context->arena_buffer == nullptr) {
+          ethosu_context->arena_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device,
+			 ethosu_context->arena_size);
+      }
+      if (ethosu_context->flash_buffer == nullptr && ethosu_context->flash_size != 0) {
+          ethosu_context->flash_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device,
+			 ethosu_context->flash_size);
+      }
 
+      size_t arena_data_size = 0;
+      auto &ethosu_tensors = model->subgraphs[0]->tensors;
       for (int i = 0; i < model->subgraphs[0]->operators.size(); i ++){
         auto &op = operations[i];
         auto &ethosu_op = model->subgraphs[0]->operators[i];
+        op.memory_layout.input_count = ethosu_op->inputs.size() - 4;
+        op.memory_layout.output_count = ethosu_op->outputs.size();
 
+        // Get command stream data size and create buffer
         auto cms_idx = ethosu_op->inputs[CMS_TENSOR_INDEX];
         auto &cms_tensor = ethosu_tensors[cms_idx];
         auto &cms_buffer = model->buffers[cms_tensor->buffer];
-
-        auto flash_idx = ethosu_op->inputs[FLASH_TENSOR_INDEX];
-        auto &flash_tensor = ethosu_tensors[flash_idx];
-        auto &flash_buffer = model->buffers[flash_tensor->buffer];
-
-        auto scratch_idx = ethosu_op->inputs[SCRATCH_TENSOR_INDEX];
-        auto &scratch_tensor = ethosu_tensors[scratch_idx];
-        size_t scratch_size = scratch_tensor->shape[0];
-
-        auto scratch_fast_idx = ethosu_op->inputs[SCRATCH_FAST_TENSOR_INDEX];
-        auto &scratch_fast_tensor = ethosu_tensors[scratch_fast_idx];
-	size_t scratch_fast_size = scratch_fast_tensor->shape[0];
-
-        // Get command stream data size and create buffer
         size_t cms_data_size = cms_buffer->data.size();
         op.ethosu_net_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device, cms_data_size);
         memcpy(op.ethosu_net_buffer->data(), cms_buffer->data.data(), cms_data_size);
         op.ethosu_network = make_shared<EthosU::Network>(*ethosu_context->device, op.ethosu_net_buffer);
 
         // Get flash tensor data size
+        auto flash_idx = ethosu_op->inputs[FLASH_TENSOR_INDEX];
+        auto &flash_tensor = ethosu_tensors[flash_idx];
+        auto &flash_buffer = model->buffers[flash_tensor->buffer];
         auto flash_data_size = flash_buffer->data.size();
+        op.need_flash = (flash_data_size != 0);
         if (flash_data_size != 0) {
-          op.ethosu_flash_buffer = make_shared<EthosU::Buffer>(*ethosu_context->device, flash_data_size);
-          memcpy(op.ethosu_flash_buffer->data(), flash_buffer->data.data(), flash_data_size);
+            memcpy(ethosu_context->flash_buffer->data() + flash_offset, flash_buffer->data.data(), flash_data_size);
         }
 
-        // Get the arena data size
-        size_t tmp_arena_size = 0;
         // Get addresses of outputs data
         for (int i = 0; i < ethosu_op->outputs.size(); ++i) {
-          auto size = GetTensorDataSize(ethosu_tensors[ethosu_op->outputs[i]]);
-          tmp_arena_size += ALIGN_SIZE(size);
+            auto ethosu_idx = ethosu_op->outputs[i];
+            auto &tensor = model->subgraphs[0]->tensors[ethosu_idx];
+            op.memory_layout.output_offset[i] = address_offsets[ethosu_idx] + arena_offset;
+            op.memory_layout.output_size[i] = GetTensorDataSize(tensor);
+
+            auto tflite_idx = FindTfliteTensorIndex(tensor->name);
+            TF_LITE_ENSURE(context, tflite_idx != -1);
+            TfLiteCustomAllocation allocation({ethosu_context->arena_buffer->data() + op.memory_layout.output_offset[i],
+			    op.memory_layout.output_size[i]});
+            this_subgraph->SetCustomAllocationForTensor(tflite_idx, allocation,
+			    kTfLiteCustomAllocationFlagsSkipAlignCheck);
         }
         // Get addresses to inputs data
-        for (int i = SCRATCH_TENSOR_INDEX; i < ethosu_op->inputs.size(); ++i) {
-          auto size = GetTensorDataSize(ethosu_tensors[ethosu_op->inputs[i]]);
-          tmp_arena_size += ALIGN_SIZE(size);
-        }
+        for (int i = 0; i < ethosu_op->inputs.size() - INPUT_TENSOR_INDEX; ++i) {
+            auto ethosu_idx = ethosu_op->inputs[i + INPUT_TENSOR_INDEX];
+            auto &tensor = model->subgraphs[0]->tensors[ethosu_idx];
+            op.memory_layout.input_offset[i] = address_offsets[ethosu_idx] + arena_offset;
+            op.memory_layout.input_size[i] = GetTensorDataSize(tensor);
 
-        if (arena_data_size < tmp_arena_size)
-          arena_data_size = tmp_arena_size;
-
-        if (ethosu_context->arena_buffer == nullptr) {
-            ethosu_context->arena_buffer
-                    = make_shared<EthosU::Buffer>(*ethosu_context->device, arena_data_size);
-        } else if (ethosu_context->arena_buffer->size() < arena_data_size) {
-            ethosu_context->arena_buffer->extend(*ethosu_context->device, arena_data_size);
+            auto tflite_idx = FindTfliteTensorIndex(tensor->name);
+            TF_LITE_ENSURE(context, tflite_idx != -1);
+            TfLiteCustomAllocation allocation({ethosu_context->arena_buffer->data() + op.memory_layout.input_offset[i],
+			    op.memory_layout.input_size[i]});
+            this_subgraph->SetCustomAllocationForTensor(tflite_idx, allocation,
+			    kTfLiteCustomAllocationFlagsSkipAlignCheck);
         }
       }
     } catch (exception &e) {
@@ -315,41 +350,16 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
 
   TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) override {
     try {
-      char* arena_data = ethosu_context->arena_buffer->data();
-      // Get addresses to input data, copy input data
-      for (int i = 0; i < node->inputs->size; i ++) {
-        auto tflite_idx = node->inputs->data[i];
-        auto tensor = &context->tensors[tflite_idx];
-        if (tensor_address_map.count(tflite_idx) == 0)
-            continue;
-
-        int32_t data_offset = tensor_address_map[tflite_idx];
-	if (data_offset == -1)
-            continue;
-        memcpy(arena_data + data_offset, tensor->data.raw, tensor->bytes);
-      }
-
       for (auto& op : operations) {
-        vector<shared_ptr<EthosU::Buffer>> ifm {ethosu_context->arena_buffer};
-        vector<shared_ptr<EthosU::Buffer>> ofm {};
-        if (options.enable_profiling) {
-          ofm.push_back(ethosu_context->qread_buffer);
-          ethosu_context->qread_buffer->resize(0);
-        }
-        if (op.ethosu_flash_buffer != nullptr)
-          ifm.push_back(op.ethosu_flash_buffer);
-
-        EthosU::Inference inference(op.ethosu_network, ifm.begin(), ifm.end(), ofm.begin(),
-                    ofm.end(), pmu_counter_config, options.enable_cycle_counter);
         /* make sure the wait completes ok */
-        if (inference.wait(options.timeout) <= 0) {
+        if (op.inference->invoke(options.timeout) <= 0) {
           TF_LITE_KERNEL_LOG(context, "Ethos_u inference failed\n");
           return kTfLiteDelegateError;
         }
 
         /* Read out PMU counters if configured */
         if (pmu_counter_config.size() > 0) {
-          const vector<uint32_t> pmus = inference.getPmuCounters();
+          const vector<uint32_t> pmus = op.inference->getPmuCounters();
           cout << "Ethos_u PMUs : [";
           for (auto p : pmus) {
             cout << " " << p;
@@ -357,7 +367,7 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
           cout << " ]" << endl;
         }
         if (options.enable_cycle_counter) {
-          cout << "Ethos-u cycle counter: " << inference.getCycleCounter() << endl;
+          cout << "Ethos-u cycle counter: " << op.inference->getCycleCounter() << endl;
         }
         if (options.enable_profiling) {
           auto count = ethosu_context->qread_buffer->size() / sizeof(EthosuQreadEvent);
@@ -375,12 +385,6 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
           }
         }
       }
-      // Get addresses to output data, copy output data
-      for (int i = 0; i < node->outputs->size; i ++) {
-        auto tensor = &context->tensors[node->outputs->data[i]];
-        int32_t data_offset = tensor_address_map[node->outputs->data[i]];
-        memcpy(tensor->data.raw, arena_data + data_offset, tensor->bytes);
-      }
     } catch (exception &e) {
       TF_LITE_KERNEL_LOG(context, "Failed to invoke ethos_u op.\n");
       return kTfLiteDelegateError;
@@ -394,8 +398,10 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
   TfLiteEthosuContext* ethosu_context;
   struct OperationDataType {
     shared_ptr<EthosU::Buffer> ethosu_net_buffer;  //Buffer for cms tensor
-    shared_ptr<EthosU::Buffer> ethosu_flash_buffer;  //Input buffer for weight tensor
     shared_ptr<EthosU::Network> ethosu_network;
+    shared_ptr<EthosU::Inference> inference;
+    EthosU::MemoryLayout memory_layout;
+    bool need_flash;
     //for vela model
     vector<int> inputs;
     vector<int> outputs;
@@ -403,10 +409,11 @@ class EthosuDelegateKernel : public SimpleDelegateKernelInterface {
 
   //for none vela model
   std::unique_ptr<ModelT> model;
-  ModelConverter *model_converter;
 
   vector<OperationDataType> operations;
-  std::map<int, int32_t> tensor_address_map;
+  const int32_t *address_offsets;
+  uint32_t flash_offset;
+  uint32_t arena_offset;
   vector<uint32_t> pmu_counter_config;
 };
 
@@ -441,6 +448,8 @@ class EthosuDelegate : public SimpleDelegateInterface {
         }
 	ethosu_context->arena_buffer = nullptr;
 	ethosu_context->flash_buffer = nullptr;
+	ethosu_context->arena_size = 0;
+	ethosu_context->flash_size = 0;
 	context_map_[context] = ethosu_context;
     } catch (exception &e) {
         TF_LITE_KERNEL_LOG(context, "Failed to create ethos_u driver.\n");
