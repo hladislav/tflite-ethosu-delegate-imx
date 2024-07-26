@@ -7,8 +7,8 @@
 include(FetchContent)
 FetchContent_Declare(
   tensorflow
-  GIT_REPOSITORY https://github.com/tensorflow/tensorflow.git
-  GIT_TAG v2.16.2
+  GIT_REPOSITORY https://github.com/nxp-imx/tensorflow-imx
+  GIT_TAG lf-6.6.36_2.1.0
 )
 
 FetchContent_GetProperties(tensorflow)
@@ -16,6 +16,7 @@ if(NOT tensorflow_POPULATED)
   FetchContent_Populate(tensorflow)
 endif()
 
+set(TFLITE_BUILD_SHARED_LIB ON CACHE BOOL "Build shared library instead of static" FORCE)
 add_subdirectory("${tensorflow_SOURCE_DIR}/tensorflow/lite"
                  "${tensorflow_BINARY_DIR}")
 get_target_property(TFLITE_SOURCE_DIR tensorflow-lite SOURCE_DIR)
