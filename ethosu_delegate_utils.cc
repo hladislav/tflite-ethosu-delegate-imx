@@ -382,6 +382,13 @@ void SetBuiltinOptions(OperatorT *op, int32_t op_code, void* data){
       op->builtin_options.Set(option);
       break;
     }
+    case BuiltinOperator_ARG_MAX: {
+      auto params = reinterpret_cast<TfLiteArgMaxParams*>(data);
+      auto option = ArgMaxOptionsT();
+      option.output_type = TfLiteTypeToSchemaType(params->output_type);
+      op->builtin_options.Set(option);
+      break;
+    }
     case BuiltinOperator_LOGISTIC:
     case BuiltinOperator_LOG:
     case BuiltinOperator_RSQRT:
