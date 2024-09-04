@@ -1010,6 +1010,9 @@ bool ConstraintMatchingInOutElements(TfLiteContext* context,
 bool ConstraintReshapeShapeConstant(TfLiteContext* context,
                                     const TfLiteNode* node,
                                     int32_t builtin_code) {
+  //Shape data is in ATTRIBUTES
+  if (node->inputs->size == 1)
+    return true;
   //Shape must be constant
   auto& shape = context->tensors[node->inputs->data[1]];
   return (shape.allocation_type == kTfLiteMmapRo && shape.data.data != nullptr);
