@@ -8,7 +8,7 @@ include(FetchContent)
 FetchContent_Declare(
   tensorflow
   GIT_REPOSITORY https://github.com/nxp-imx/tensorflow-imx
-  GIT_TAG lf-6.6.36_2.1.0
+  GIT_TAG lf-6.6.52-2.2.0
 )
 
 FetchContent_GetProperties(tensorflow)

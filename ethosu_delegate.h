@@ -1,4 +1,5 @@
 /*
+ * Copyright 2025 Ladislav Hano
  * Copyright 2022-2023 NXP
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -13,6 +14,7 @@
 
 #include "tensorflow/lite/c/common.h"
 #include "ethosu_drv.h"
+#include "ethosu.h"
 
 #define ETHOSU_DEFAULT_DEVICE_NAME (char*)"/dev/ethosu0"
 #define ETHOSU_DEFAULT_TIMEOUT 60000000000

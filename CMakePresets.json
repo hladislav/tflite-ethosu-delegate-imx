@@ -1,0 +1,119 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "qnx",
+            "description": "QNX base release build",
+            "generator": "Unix Makefiles",
+            "binaryDir": "./build_qnx",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE":            "cmake/qnx/qnx_toolchain.cmake",
+                "CMAKE_SYSTEM_NAME":               "QNX",
+                "TFLITE_ENABLE_EXTERNAL_DELEGATE": "ON",
+                "TFLITE_HOST_TOOLS_DIR":           "host_tools"
+            }
+        },
+        {
+            "name": "qnx_debug",
+            "description": "QNX base debug build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE":                 "Debug"
+            },
+            "inherits": [ "qnx" ]
+        },
+        {
+            "name": "qnx_tests",
+            "binaryDir": "./build_qnx_tests",
+            "description": "QNX release build with kernel tests",
+            "cacheVariables": {
+                "TFLITE_KERNEL_TEST":           "ON"
+            },
+            "inherits": [ "qnx" ]
+        },
+        {
+            "name": "qnx_tests_debug",
+            "binaryDir": "./build_qnx_tests",
+            "description": "QNX debug build with kernel tests",
+            "cacheVariables": {
+                "TFLITE_KERNEL_TEST":           "ON"
+            },
+            "inherits": [ "qnx_debug" ]
+        },
+        {
+            "name": "linux",
+            "description": "Linux base release build",
+            "binaryDir": "./build_linux",
+            "cacheVariables": {
+                "TFLITE_ENABLE_EXTERNAL_DELEGATE": "ON",
+                "TFLITE_HOST_TOOLS_DIR":           "host_tools"
+            }
+        },
+        {
+            "name": "linux_debug",
+            "description": "Linux base release build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE":                "Debug"
+            },
+            "inherits": [ "linux" ]
+        },
+        {
+            "name": "linux_tests",
+            "binaryDir": "./build_linux_tests",
+            "description": "Linux release build with kernel tests",
+            "cacheVariables": {
+                "TFLITE_KERNEL_TEST":           "ON"
+            },
+            "inherits": [ "linux" ]
+        },
+        {
+            "name": "linux_tests_debug",
+            "description": "Linux debug build with kernel tests",
+            "cacheVariables": {
+                "TFLITE_KERNEL_TEST":           "ON"
+            },
+            "inherits": [ "linux_debug", "linux_tests" ]
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "qnx",
+            "configurePreset": "qnx",
+            "jobs": 12
+        },
+        {
+            "name": "qnx_debug",
+            "configurePreset": "qnx_debug",
+            "jobs": 12
+        },
+        {
+            "name": "qnx_tests",
+            "configurePreset": "qnx_tests",
+            "jobs": 12
+        },
+        {
+            "name": "qnx_tests_debug",
+            "configurePreset": "qnx_tests_debug",
+            "jobs": 12
+        },
+        {
+            "name": "linux",
+            "configurePreset": "linux",
+            "jobs": 12
+        },
+        {
+            "name": "linux_debug",
+            "configurePreset": "linux_debug",
+            "jobs": 12
+        },
+        {
+            "name": "linux_tests",
+            "configurePreset": "linux_tests",
+            "jobs": 12
+        },
+        {
+            "name": "linux_tests_debug",
+            "configurePreset": "linux_tests_debug",
+            "jobs": 12
+        }
+    ]
+}
