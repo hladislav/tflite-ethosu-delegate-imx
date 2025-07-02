@@ -1,7 +1,9 @@
-# TfLite-ethosu-delegate
-TfLite-ethosu-delegate is an delegate for tensorflow lite.
+# Fork of NXP's [TfLite-ethosu-delegate](https://github.com/nxp-imx/tflite-ethosu-delegate-imx) with added support for QNX OS
 
-# Use tflite-ethosu-delegate
+TfLite-ethosu-delegate is a LiteRT (TFLite) delegate.
+This fork extends the functionality to also support QNX OS and provides CMakePresets.json for easier CMake configuration process.
+
+# Use tflite-ethosu-delegate for Linux
 
 ## Prepare source code
 ```sh
@@ -10,7 +12,7 @@ git clone https://github.com/nxpmicro/tflite-ethosu-delegate.git
 # tensorflow is optional, it will be downloaded automatically if not present
 git clone https://github.com/tensorflow/tensorflow.git
 ```
-# Build from source with cmake
+# Build from source with CMake (for Linux)
 
 ```sh
 # set the toolchain env
@@ -18,15 +20,33 @@ source /PATH_TO_TOOLCHAIN/environment-setup-cortexa53-crypto-poky-linux
 
 # build the delegate
 cd tflite-ethosu-delegate
-mkdir build && cd build
-cmake ..
-make -j12
+cmake --preset linux
+cmake --build --preset linux
+
+cd build_linux
 
 # benchmark_model
 make benchmark_model -j12
 # label_image
-make lable_image -j12
+make label_image -j12
 ```
+
+# Build from source with CMake (for QNX)
+
+```sh
+cd tflite-ethosu-delegate
+cmake --preset qnx
+cmake --build --preset qnx
+
+cd build_qnx
+
+# benchmark_model
+make benchmark_model -j12
+# label_image
+make label_image -j12
+```
+
+---
 
 If you would like to build using local version of tensorflow, you can use `FETCHCONTENT_SOURCE_DIR_TENSORFLOW` cmake variable. Point this variable to your tensorflow tree. For additional details on this variable please see the [official cmake documentation](https://cmake.org/cmake/help/latest/module/FetchContent.html#command:fetchcontent_populate)
 
